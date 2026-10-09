@@ -42,6 +42,8 @@ export interface FetchSubtitleResult {
   track: SubtitleTrack
   /** Every subtitle language/revision advertised by the platform. */
   availableLanguages: SubtitleTrackInfo[]
+  /** Present only when the rolling-caption cleanup actually changed the cues. */
+  dedupe?: DedupeReport
 }
 
 export interface FetchSubtitleOptions {
@@ -51,4 +53,20 @@ export interface FetchSubtitleOptions {
   showTimestamp?: boolean
   /** Bilibili multi-part page number. */
   pageNumber?: string | null
+  /**
+   * Strip the duplicated words that rolling auto-captions (ASR) repeat at the
+   * start of each line. `'auto'` (default) applies it only when at least 20% of
+   * the cues repeat their predecessor, so hand-written tracks are left alone.
+   */
+  dedupe?: boolean | 'auto'
+}
+
+/** What the rolling-caption cleanup removed. */
+export interface DedupeReport {
+  /** Cues fully covered by their predecessor and therefore dropped. */
+  removedCues: number
+  /** Duplicated words stripped off the fronts of the remaining cues. */
+  removedWords: number
+  /** Share of cues that repeated the previous line, 0-1. */
+  overlapRatio: number
 }

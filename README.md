@@ -120,16 +120,45 @@ fetch_subtitle({
 | `language` | no | Preferred language code (`zh-CN`, `en`, …). Default: Chinese → English → first. |
 | `format` | no | `text` (default), `timestamped`, `grouped`, `srt`, `vtt`, `json`. |
 | `showTimestamp` | no | Prefix `text` lines with `[mm:ss]`. |
+| `dedupe` | no | Strip the duplicated words that rolling auto-captions (ASR) repeat on every line. Default `auto`: applied only when 20%+ of the lines overlap. Set `false` to keep the raw track. |
 | `savePath` | no | File path or directory to write to. Auto-names from the title + language. |
 | `pageNumber` | no | Bilibili multi-part `P` index (default 1). |
 
 ### `/subtitle` command
 
 ```
-/subtitle <url> [--format srt|vtt|json|text] [--lang <code>] [--out <path>]
+/subtitle <url> [--format srt|vtt|json|text] [--lang <code>] [--out <path>] [--no-dedupe]
 ```
 
 Fetches and writes the subtitle to disk, then reports the path.
+
+## Auto-caption dedupe
+
+Machine-generated captions are streamed as a **rolling window**: every line repeats the tail of the line
+before it and only the end of the last line is new speech.
+
+```
+Today I'm speaking with
+Today I'm speaking with Andrej Karpathy
+Andrej Karpathy, why do you say
+```
+
+Our extractors keep one cue per ASR line, so that duplication lands in the transcript verbatim — and
+the summarising model pays for it twice. `dedupeRollingCues` compares each cue with the previous kept
+cue, strips the overlapping head words, drops a cue that carried no new words, and hands the timing it
+covered to its predecessor.
+
+It is content-gated, not flag-gated: `'auto'` (the default) only rewrites the cues when **≥20% of them
+overlap their predecessor by ≥3 words**, so hand-written subtitles pass through untouched even though
+the track is labelled manual. Measured on a simulated 20 000-word YouTube ASR track (4 000 cues):
+
+| output | tokens (gpt-4o) | after dedupe | saving |
+| --- | --- | --- | --- |
+| `text` | 71542 | 49922 | **30%** |
+| `grouped` | 67511 | 45893 | **32%** |
+
+The tool always reports what it removed (`已去除滚动重复: -N 行 / -M 词`), so nothing disappears silently.
+Force it with `dedupe: true`, or keep the raw track with `dedupe: false` / `/subtitle --no-dedupe`.
 
 ## Formats
 
@@ -144,6 +173,8 @@ Fetches and writes the subtitle to disk, then reports the path.
 
 ## Notes & limitations
 
+- Auto-generated caption tracks repeat the previous line, which is what the dedupe pass removes. If a
+  transcript looks like it is missing words, re-run with `dedupe: false` and compare.
 - Bilibili's subtitle list is behind the logged-in `player/v2` API. Videos where the uploader disabled
   subtitles, or premium videos without entitlement, will return an empty list even with a valid token.
 - YouTube now gates its `timedtext` endpoint behind a proof-of-origin token, so the native path often

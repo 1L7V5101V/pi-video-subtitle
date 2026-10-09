@@ -12,6 +12,7 @@ import { fetchBilibiliSubtitle } from '../src/bilibili'
 import { renderSubtitle } from '../src/download'
 import { fetchSubtitle, parseVideoUrl } from '../src/fetchSubtitle'
 import { parseJson3, parseSubtitleFile } from '../src/ytdlp'
+import { dedupeRollingCues, overlapWordCount } from '../src/utils'
 
 let failures = 0
 const check = (label: string, condition: boolean, extra = '') => {
@@ -234,6 +235,85 @@ try {
       (error as Error).message.slice(0, 60),
     )
   }
+} finally {
+  globalThis.fetch = REAL_FETCH
+}
+
+// ---------------------------------------------------------------------------
+// Rolling auto-caption (ASR) dedupe
+// ---------------------------------------------------------------------------
+console.log('\n# ASR rolling-window dedupe')
+
+check(
+  'overlap measures the repeated tail',
+  overlapWordCount('hello world this is a test', 'this is a test of the system') === 4,
+)
+check('overlap is zero for unrelated lines', overlapWordCount('completely different', 'nothing in common') === 0)
+
+const rolling = [
+  'the quick brown fox jumps',
+  'the quick brown fox jumps over the lazy dog',
+  'over the lazy dog and runs away',
+  'and runs away into the woods',
+  'into the woods',
+  'and then it stops',
+].map((text, index) => ({ index, start: index * 2, end: index * 2 + 2, text }))
+
+const deduped = dedupeRollingCues(rolling)
+check(
+  'rolling repeats are stripped',
+  deduped.cues.map((cue) => cue.text).join(' | ') ===
+    'the quick brown fox jumps | over the lazy dog | and runs away | into the woods | and then it stops',
+  deduped.cues.map((cue) => cue.text).join(' | '),
+)
+check('fully covered lines are dropped', deduped.report.removedCues === 1, String(deduped.report.removedCues))
+check('removed word count', deduped.report.removedWords === 15, String(deduped.report.removedWords))
+check('overlap ratio measured', Math.abs(deduped.report.overlapRatio - 4 / 6) < 1e-9, String(deduped.report.overlapRatio))
+check('surviving lines are re-indexed', deduped.cues.every((cue, index) => cue.index === index))
+check('a dropped line extends its predecessor', deduped.cues[3].end === 10, String(deduped.cues[3].end))
+
+const handWritten = ['你好，欢迎观看', '今天我们聊聊字幕', '先从 B 站开始'].map((text, index) => ({
+  index,
+  start: index,
+  end: index + 1,
+  text,
+}))
+check('hand-written tracks are untouched', dedupeRollingCues(handWritten).report.removedWords === 0)
+
+const asrBody = [
+  { from: 0, to: 2, content: 'this is a rolling caption' },
+  { from: 2, to: 4, content: 'this is a rolling caption and it repeats' },
+  { from: 4, to: 6, content: 'and it repeats a lot of times' },
+  { from: 6, to: 8, content: 'a lot of times' },
+]
+globalThis.fetch = (async (input: RequestInfo | URL) => {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+  if (url.includes('/x/web-interface/view')) {
+    return json({ code: 0, data: { aid: 1, bvid: 'BV1GJ411x7h7', title: 'ASR', pages: [{ page: 1, cid: 9 }] } })
+  }
+  if (url.includes('/x/player/v2')) {
+    return json({
+      code: 0,
+      data: { subtitle: { subtitles: [{ lan: 'ai-zh', subtitle_url: 'https://x/asr.json', ai_status: 1 }] } },
+    })
+  }
+  return json({ body: asrBody })
+}) as typeof fetch
+try {
+  const auto = await fetchSubtitle('BV1GJ411x7h7')
+  check('auto dedupe fires on a rolling track', auto.dedupe !== undefined, JSON.stringify(auto.dedupe))
+  check('auto dedupe shrinks the transcript', auto.track.cues.length === 3, String(auto.track.cues.length))
+  check(
+    'auto dedupe keeps every word of speech',
+    renderSubtitle(auto, { format: 'text' }) === 'this is a rolling caption\nand it repeats\na lot of times',
+    renderSubtitle(auto, { format: 'text' }).replace(/\n/g, ' / '),
+  )
+
+  const off = await fetchSubtitle('BV1GJ411x7h7', { dedupe: false })
+  check('dedupe can be switched off', off.dedupe === undefined && off.track.cues.length === 4, String(off.track.cues.length))
+
+  const forced = await fetchSubtitle('BV1GJ411x7h7', { dedupe: true })
+  check('dedupe can be forced', forced.dedupe?.removedCues === 1, JSON.stringify(forced.dedupe))
 } finally {
   globalThis.fetch = REAL_FETCH
 }

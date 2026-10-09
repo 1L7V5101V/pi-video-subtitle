@@ -1,8 +1,25 @@
 import { fetchBilibiliSubtitle } from './bilibili'
 import type { FetchSubtitleOptions, FetchSubtitleResult, VideoService } from './types'
-import { parseVideoUrl } from './utils'
+import { DEDUPE_MIN_OVERLAP_RATIO, dedupeRollingCues, parseVideoUrl } from './utils'
 import { fetchYoutubeSubtitle } from './youtube'
 import { fetchWithYtDlp, hasYtDlp, ytDlpHint } from './ytdlp'
+
+/**
+ * Rolling auto-captions repeat their predecessor's tail on every line. Left
+ * alone that duplication inflates a transcript by roughly a quarter to a third,
+ * which the summarising model then pays for. `'auto'` needs a fifth of the cues
+ * to overlap before it touches anything, so hand-written tracks pass through.
+ */
+function applyDedupe(
+  result: FetchSubtitleResult,
+  mode: FetchSubtitleOptions['dedupe'],
+): FetchSubtitleResult {
+  if (mode === false) return result
+  const { cues, report } = dedupeRollingCues(result.track.cues)
+  if (report.removedWords === 0) return result
+  if (mode !== true && report.overlapRatio < DEDUPE_MIN_OVERLAP_RATIO) return result
+  return { ...result, track: { ...result.track, cues }, dedupe: report }
+}
 
 /**
  * Fetch subtitles for any supported video URL.
@@ -17,13 +34,14 @@ export async function fetchSubtitle(
     : parseVideoUrl(input)
 
   if (parsed.service === 'youtube') {
-    return fetchYoutubeSubtitle(parsed.videoId, options)
+    return applyDedupe(await fetchYoutubeSubtitle(parsed.videoId, options), options.dedupe)
   }
   if (parsed.service === 'bilibili') {
-    return fetchBilibiliSubtitle(parsed.videoId, {
+    const result = await fetchBilibiliSubtitle(parsed.videoId, {
       ...options,
       pageNumber: options.pageNumber ?? parsed.pageNumber,
     })
+    return applyDedupe(result, options.dedupe)
   }
 
   if (!hasYtDlp()) {
@@ -33,13 +51,13 @@ export async function fetchSubtitle(
     )
   }
   try {
-    return await fetchWithYtDlp(parsed.sourceUrl, options, 'ytdlp')
+    return applyDedupe(await fetchWithYtDlp(parsed.sourceUrl, options, 'ytdlp'), options.dedupe)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(`${message}${ytDlpHint()}`)
   }
 }
 
-export { parseVideoUrl, serializeCues, extensionForFormat } from './utils'
+export { parseVideoUrl, serializeCues, extensionForFormat, dedupeRollingCues } from './utils'
 export type { SubtitleFormat } from './utils'
 export * from './types'

@@ -30,6 +30,7 @@ fetch_subtitle(url, service?, language?, format?, showTimestamp?, savePath?, pag
 | `language` | no | Preferred language code, e.g. `zh-CN`, `zh-Hans`, `en`. Default preference: Chinese → English → first track. |
 | `format` | no | `text` (default), `timestamped`, `grouped`, `srt`, `vtt`, `json`. Use `srt`/`vtt` for player-ready subtitle files. |
 | `showTimestamp` | no | Adds a `[mm:ss]` prefix per line in `text` format. |
+| `dedupe` | no | Strip the duplicated words rolling auto-captions (ASR) repeat on every line — ~30% fewer tokens. Default `auto` (only when 20%+ of lines overlap); `false` keeps the raw track. |
 | `savePath` | no | Write the subtitle to disk. A file path, or a directory (auto-names `标题.语言.ext`). |
 | `pageNumber` | no | Bilibili multi-part `P` number. Defaults to 1. |
 
@@ -48,6 +49,17 @@ fetch_subtitle(url="https://youtu.be/dQw4w9WgXcQ", format="grouped")
 ```
 
 `grouped` collapses the transcript into ~30 blocks (the BibiGPT preprocessing style) which is cheaper to summarise.
+
+**Cheapest transcript for a summary**
+
+```
+fetch_subtitle(url="<any video url>", format="grouped")
+```
+
+`grouped`/`text` drop the timestamps that otherwise dominate the token count (the same transcript as
+`json` costs 2.9× more, as `srt` 2.0×). Auto-generated tracks additionally lose ~30% of their tokens to
+the rolling-repeat dedupe, which is on by default. For a very long video, summarise the returned text in
+chunks rather than pulling the whole transcript into context twice.
 
 **Pick a specific language**
 
@@ -92,6 +104,7 @@ Bilibili needs a token; YouTube needs none. If YouTube's watch page is blocked, 
 ## Notes
 
 - Read-only network access; the only filesystem write is the optional `savePath`.
+- Auto-caption tracks repeat the previous line by design; the default `dedupe` removes that duplication and reports `已去除滚动重复: -N 行 / -M 词`. Hand-written tracks are never touched by `auto`, so if a transcript still looks wrong, pass `dedupe: false` and compare before blaming the extraction.
 - Prefer `grouped` or `timestamped` when the next step is an LLM summary; prefer `srt`/`vtt` when the user wants a subtitle file for a video player.
 - Bare ids work: `BV1fX4y1Q7Ux`, `av123456`, and an 11-char YouTube id are all accepted.
 - Sites that burn subtitles into the video pixels cannot be handled by any extractor.

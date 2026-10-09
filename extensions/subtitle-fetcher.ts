@@ -48,6 +48,12 @@ const params = Type.Object({
   showTimestamp: Type.Optional(
     Type.Boolean({ description: 'Prefix each line with its timestamp (text format only).' }),
   ),
+  dedupe: Type.Optional(
+    Type.Boolean({
+      description:
+        'Remove the duplicated words that rolling auto-generated (ASR) captions repeat on every line. Defaults to auto: only applied when 20%+ of the lines overlap, so hand-written subtitles are never touched.',
+    }),
+  ),
   savePath: Type.Optional(
     Type.String({
       description:
@@ -67,6 +73,7 @@ interface ToolDetails {
   isAuto: boolean
   cueCount: number
   availableLanguages: { language: string; label: string; isAuto: boolean }[]
+  dedupe?: { removedCues: number; removedWords: number; overlapRatio: number }
   savedPath?: string
   truncated?: boolean
   fullOutputPath?: string
@@ -82,8 +89,13 @@ function describe(result: FetchSubtitleResult): string {
     `语言: ${result.track.language} — ${result.track.label}${result.track.isAuto ? ' (自动生成)' : ''}`,
     `字幕条数: ${result.track.cues.length}`,
     `可用语言: ${summary || '无'}`,
+    result.dedupe
+      ? `已去除滚动重复: -${result.dedupe.removedCues} 行 / -${result.dedupe.removedWords} 词（重复率 ${Math.round(result.dedupe.overlapRatio * 100)}%）`
+      : '',
     `来源: ${result.sourceUrl}`,
-  ].join('\n')
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 async function resolveSaveTarget(
@@ -123,6 +135,7 @@ export default function (pi: ExtensionAPI) {
         language: args.language,
         showTimestamp: args.showTimestamp,
         pageNumber: args.pageNumber ?? undefined,
+        dedupe: args.dedupe,
       })
 
       const rendered = renderSubtitle(result, { format, showTimestamp: args.showTimestamp })
@@ -137,6 +150,7 @@ export default function (pi: ExtensionAPI) {
         isAuto: result.track.isAuto,
         cueCount: result.track.cues.length,
         availableLanguages: result.availableLanguages,
+        dedupe: result.dedupe,
       }
 
       if (args.savePath) {
@@ -194,6 +208,7 @@ export default function (pi: ExtensionAPI) {
         prefix + theme.fg('muted', `${details.service} `) + theme.fg('text', details.title)
       const meta = theme.fg('dim', ` · ${details.language}${details.isAuto ? '(auto)' : ''} · ${details.cueCount} cues`)
       let out = head + meta
+      if (details.dedupe) out += theme.fg('dim', ` · deduped -${details.dedupe.removedWords}w`)
       if (details.savedPath) out += `\n  ${theme.fg('dim', `saved: ${details.savedPath}`)}`
       if (expanded && fallback) out += `\n${theme.fg('dim', fallback)}`
       return new Text(out, 0, 0)
@@ -202,17 +217,21 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand('subtitle', {
     description:
-      'Download subtitles for a video (Bilibili/YouTube/any yt-dlp site): /subtitle <url> [--format srt] [--lang zh-CN] [--out path]',
+      'Download subtitles for a video (Bilibili/YouTube/any yt-dlp site): /subtitle <url> [--format srt] [--lang zh-CN] [--out path] [--no-dedupe]',
     handler: async (rawArgs, ctx) => {
       const tokens = (rawArgs || '').split(/\s+/).filter(Boolean)
       if (tokens.length === 0) {
-        ctx.ui.notify('用法: /subtitle <video-url> [--format srt|vtt|json|text] [--lang <code>] [--out <path>]', 'error')
+        ctx.ui.notify(
+          '用法: /subtitle <video-url> [--format srt|vtt|json|text] [--lang <code>] [--out <path>] [--no-dedupe]',
+          'error',
+        )
         return
       }
 
       let format: SubtitleFormat = 'text'
       let language: string | undefined
       let outPath: string | undefined
+      let dedupe: boolean | 'auto' = 'auto'
       const positional: string[] = []
 
       for (let i = 0; i < tokens.length; i++) {
@@ -220,6 +239,8 @@ export default function (pi: ExtensionAPI) {
         if (token === '--format' || token === '-f') format = (tokens[++i] as SubtitleFormat) ?? 'text'
         else if (token === '--lang' || token === '-l') language = tokens[++i]
         else if (token === '--out' || token === '-o') outPath = tokens[++i]
+        else if (token === '--dedupe') dedupe = true
+        else if (token === '--no-dedupe') dedupe = false
         else if (token.startsWith('--format=')) format = token.slice(9) as SubtitleFormat
         else if (token.startsWith('--lang=')) language = token.slice(7)
         else if (token.startsWith('--out=')) outPath = token.slice(6)
@@ -233,7 +254,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       try {
-        const result = await fetchSubtitle(url, { language, showTimestamp: format === 'timestamped' })
+        const result = await fetchSubtitle(url, {
+          language,
+          showTimestamp: format === 'timestamped',
+          dedupe,
+        })
         const target = await resolveSaveTarget(
           outPath ?? defaultFileName(result, format),
           result,
@@ -245,8 +270,11 @@ export default function (pi: ExtensionAPI) {
         await withFileMutationQueue(target, async () => {
           await writeFile(target, rendered, 'utf8')
         })
+        const dedupeNote = result.dedupe
+          ? `（已去重 -${result.dedupe.removedCues} 行 / -${result.dedupe.removedWords} 词）`
+          : ''
         ctx.ui.notify(
-          `已保存 ${result.track.cues.length} 条字幕 (${result.track.language}) → ${target}`,
+          `已保存 ${result.track.cues.length} 条字幕 (${result.track.language})${dedupeNote} → ${target}`,
           'info',
         )
       } catch (error) {

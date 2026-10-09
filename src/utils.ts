@@ -1,4 +1,4 @@
-import type { ParsedVideo, SubtitleCue } from './types'
+import type { DedupeReport, ParsedVideo, SubtitleCue } from './types'
 
 /**
  * Detect the video service and normalise the input into an id.
@@ -128,6 +128,80 @@ export function formatSrtTimestamp(seconds: number): string {
   const secs = Math.floor(safe % 60)
   const millis = Math.round((safe - Math.floor(safe)) * 1000)
   return `${pad(hours)}:${pad(minutes)}:${pad(secs)},${pad(millis, 3)}`
+}
+
+/** Share of overlapping cues above which `dedupe: 'auto'` kicks in. */
+export const DEDUPE_MIN_OVERLAP_RATIO = 0.2
+
+function splitWords(text: string): string[] {
+  return text.split(/\s+/).filter(Boolean)
+}
+
+/** Longest run of trailing words in `prev` that is also the start of `next`. */
+export function overlapWordCount(prev: string, next: string): number {
+  const before = splitWords(prev)
+  const after = splitWords(next)
+  const limit = Math.min(before.length, after.length)
+  for (let size = limit; size > 0; size--) {
+    let matched = true
+    for (let i = 0; i < size; i++) {
+      if (before[before.length - size + i] !== after[i]) {
+        matched = false
+        break
+      }
+    }
+    if (matched) return size
+  }
+  return 0
+}
+
+/**
+ * Machine-generated captions are streamed as a rolling window: every line
+ * repeats the tail of the line before it before adding new words.
+ *
+ *   "Today I'm speaking with"
+ *   "Today I'm speaking with Andrej Karpathy"
+ *   "Andrej Karpathy, why do you say"
+ *
+ * Only the last line carries new speech, so the overlap is pure duplication.
+ * Hand-written tracks never do this, and a repeated *phrase* (a chorus, a
+ * catchphrase) would have to hit the same tail-prefix pattern on 20%+ of all
+ * cues before this fires on its own.
+ */
+export function dedupeRollingCues(
+  cues: SubtitleCue[],
+  minOverlapWords = 3,
+): { cues: SubtitleCue[]; report: DedupeReport } {
+  const out: SubtitleCue[] = []
+  let overlapping = 0
+  let removedCues = 0
+  let removedWords = 0
+
+  for (const cue of cues) {
+    const previous = out[out.length - 1]
+    if (previous) {
+      const overlap = overlapWordCount(previous.text, cue.text)
+      if (overlap >= minOverlapWords) {
+        overlapping++
+        removedWords += overlap
+        // The duplicate carried no new timing, but it does extend the previous line.
+        previous.end = cue.end ?? previous.end
+        const remaining = splitWords(cue.text).slice(overlap).join(' ')
+        if (!remaining) {
+          removedCues++
+          continue
+        }
+        out.push({ index: out.length, start: cue.start, end: cue.end, text: remaining })
+        continue
+      }
+    }
+    out.push({ index: out.length, start: cue.start, end: cue.end, text: cue.text })
+  }
+
+  return {
+    cues: out,
+    report: { removedCues, removedWords, overlapRatio: cues.length === 0 ? 0 : overlapping / cues.length },
+  }
 }
 
 /**
