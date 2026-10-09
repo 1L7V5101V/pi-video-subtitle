@@ -100,7 +100,8 @@ export function ytDlpHint(): string {
   return (
     '\n\n提示：若所在网络无法直连，可设置代理后重试：PI_SUBTITLE_PROXY=http://127.0.0.1:7890（yt-dlp 亦会读取 HTTPS_PROXY）。' +
     '若站点要求登录（例如 YouTube 提示 “Sign in to confirm you’re not a bot”），请为 yt-dlp 配置 cookies：' +
-    'YT_DLP_COOKIES_FROM_BROWSER=chrome 或 YT_DLP_COOKIES=/path/cookies.txt。'
+    'YT_DLP_COOKIES=/path/cookies.txt（推荐，Netscape 格式）。注意 Chrome 127+ / Edge 的 cookies 在 Windows 上' +
+    '常见无法解密（DPAPI / app-bound encryption），此时 YT_DLP_COOKIES_FROM_BROWSER 会失败，扩展会自动回退到无 cookies 重试。'
   )
 }
 
@@ -110,26 +111,48 @@ export function hasYtDlp(): boolean {
   return ytDlpAvailable
 }
 
-function ytDlpArgs(extra: string[]): string[] {
+function ytDlpArgs(extra: string[], withCookies = true): string[] {
   const args = ['--no-warnings', '--no-playlist']
   if (process.env.PI_SUBTITLE_PROXY) args.push('--proxy', process.env.PI_SUBTITLE_PROXY)
-  if (process.env.YT_DLP_COOKIES) args.push('--cookies', process.env.YT_DLP_COOKIES)
-  else if (process.env.YT_DLP_COOKIES_FROM_BROWSER) {
-    args.push('--cookies-from-browser', process.env.YT_DLP_COOKIES_FROM_BROWSER)
+  if (withCookies) {
+    if (process.env.YT_DLP_COOKIES) args.push('--cookies', process.env.YT_DLP_COOKIES)
+    else if (process.env.YT_DLP_COOKIES_FROM_BROWSER) {
+      args.push('--cookies-from-browser', process.env.YT_DLP_COOKIES_FROM_BROWSER)
+    }
   }
   return [...args, ...extra]
 }
 
+/**
+ * Chrome 127+ (and Edge) encrypt their cookie database with app-bound
+ * encryption, so `--cookies-from-browser` dies with a DPAPI error on a lot of
+ * Windows machines. yt-dlp treats that as fatal, which would cost us the video
+ * as well as the cookies — so recognise it and retry without cookies.
+ */
+const COOKIE_FAILURE =
+  /Failed to decrypt with DPAPI|Could not copy Chrome cookie database|could not find .{0,40}cookies database|unsupported browser/i
+
+function lastLine(text: string | null | undefined): string {
+  return (text ?? '').trim().split('\n').filter(Boolean).slice(-1)[0] ?? 'unknown yt-dlp error'
+}
+
+function spawnYtDlp(args: string[]): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync(ytDlpBinary(), args, { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
+  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
 function runYtDlp(args: string[]): string {
-  const result = spawnSync(ytDlpBinary(), ytDlpArgs(args), {
-    encoding: 'utf8',
-    maxBuffer: 128 * 1024 * 1024,
-  })
-  if (result.status !== 0) {
-    const stderr = (result.stderr ?? '').trim()
-    throw new Error(stderr.split('\n').filter(Boolean).slice(-1)[0] ?? 'unknown yt-dlp error')
+  const first = spawnYtDlp(ytDlpArgs(args))
+  if (first.status === 0) return first.stdout
+
+  const cookieFailure = COOKIE_FAILURE.test(first.stderr)
+  const hadCookies = Boolean(process.env.YT_DLP_COOKIES || process.env.YT_DLP_COOKIES_FROM_BROWSER)
+  if (hadCookies && cookieFailure) {
+    const retry = spawnYtDlp(ytDlpArgs(args, false))
+    if (retry.status === 0) return retry.stdout
+    throw new Error(`${lastLine(retry.stderr)}（已回退到无 cookies 重试；cookies 读取失败：${lastLine(first.stderr)}）`)
   }
-  return result.stdout ?? ''
+  throw new Error(lastLine(first.stderr))
 }
 
 /**

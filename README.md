@@ -74,16 +74,26 @@ export PI_SUBTITLE_PROXY=http://127.0.0.1:7890
 
 # Optional: give yt-dlp your browser cookies when a site asks you to sign in
 # (e.g. YouTube's “Sign in to confirm you're not a bot”)
-export YT_DLP_COOKIES_FROM_BROWSER=chrome   # or: YT_DLP_COOKIES=/path/cookies.txt
+export YT_DLP_COOKIES=/path/cookies.txt              # recommended: Netscape cookies.txt
+export YT_DLP_COOKIES_FROM_BROWSER=chrome            # may fail on Windows, see below
 ```
 
 On Windows PowerShell:
 
 ```powershell
 $env:BILIBILI_SESSION_TOKEN="xxxxxxxx"
+setx PI_SUBTITLE_PROXY "http://127.0.0.1:7890"   # persists for future sessions
 ```
 
 Bilibili needs a token; YouTube needs none; other sites need whatever yt-dlp needs.
+
+`YT_DLP_COOKIES_FROM_BROWSER` only works while the browser still lets yt-dlp read its cookie database.
+Chrome 127+ and current Edge encrypt it with app-bound encryption, so on many Windows machines the
+read dies with `Failed to decrypt with DPAPI` (or `Could not copy Chrome cookie database`) and yt-dlp
+exits before touching the video. The extension detects exactly that failure and retries **without**
+cookies, so you keep the video you could still fetch — but if a site really needs a login, export a
+Netscape-format `cookies.txt` (e.g. the “Get cookies.txt LOCALLY” extension) and point `YT_DLP_COOKIES`
+at it instead.
 
 ## Test
 
@@ -184,6 +194,9 @@ Force it with `dedupe: true`, or keep the raw track with `dedupe: false` / `/sub
 - Sites that only burn subtitles into the video pixels cannot be handled by any extractor.
 - A site may advertise a subtitle language and still fail to serve it — YouTube lists ~150 auto-translated
   tracks and rate-limits most of them — so every candidate track is retried before giving up.
+- Browser-cookie extraction (`YT_DLP_COOKIES_FROM_BROWSER`) is unreliable on Windows because of Chrome's
+  app-bound encryption; a cookie-export file (`YT_DLP_COOKIES`) is the dependable route. When the browser
+  read fails anyway, the extension retries without cookies rather than failing the whole extraction.
 
 ## Credits
 
