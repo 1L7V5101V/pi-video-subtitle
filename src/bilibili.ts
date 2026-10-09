@@ -1,7 +1,21 @@
+import { createHash } from 'node:crypto'
+
 import type { FetchSubtitleOptions, FetchSubtitleResult, SubtitleCue, SubtitleTrackInfo } from './types'
 import { pickTrack, resolveBilibiliShortLink } from './utils'
 
 const API_BASE = 'https://api.bilibili.com'
+
+/**
+ * Permutation table of Bilibili's WBI signature scheme. Signing is not optional
+ * here: the unsigned `x/player/v2` endpoint answers with either an empty list or
+ * a cached `subtitle_url` that belongs to a *different* video, while the signed
+ * `x/player/wbi/v2` endpoint reliably reports the tracks of this exact video.
+ */
+const WBI_MIXIN_KEY_TAB = [
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38,
+  41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36,
+  20, 34, 44, 52,
+]
 
 interface RawSubtitle {
   lan: string
@@ -31,6 +45,15 @@ interface PlayerResponse {
   data?: {
     subtitle?: {
       subtitles?: RawSubtitle[]
+    }
+  }
+}
+
+interface NavResponse {
+  data?: {
+    wbi_img?: {
+      img_url?: string
+      sub_url?: string
     }
   }
 }
@@ -72,6 +95,60 @@ function normaliseUrl(url: string): string {
   return url.startsWith('//') ? `https:${url}` : url
 }
 
+function wbiKeyFromUrl(url: string): string {
+  return url.slice(url.lastIndexOf('/') + 1).split('.')[0]
+}
+
+/** Derive the 32-char mixin key from the two `wbi_img` URLs reported by `x/web-interface/nav`. */
+export function bilibiliMixinKey(imgUrl: string, subUrl: string): string {
+  const source = wbiKeyFromUrl(imgUrl) + wbiKeyFromUrl(subUrl)
+  return WBI_MIXIN_KEY_TAB.map((index) => source[index] ?? '')
+    .join('')
+    .slice(0, 32)
+}
+
+/** Append `wts` + `w_rid` to query params, as Bilibili's WBI scheme requires. */
+export function signWbiQuery(
+  params: Record<string, string | number>,
+  mixinKey: string,
+  timestamp = Math.floor(Date.now() / 1000),
+): string {
+  const query = [...new URLSearchParams({ ...params, wts: String(timestamp) }).entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join('&')
+  const wRid = createHash('md5').update(query + mixinKey).digest('hex')
+  return `${query}&w_rid=${wRid}`
+}
+
+async function fetchMixinKey(headers: Record<string, string>): Promise<string | null> {
+  try {
+    const nav = await getJson<NavResponse>(`${API_BASE}/x/web-interface/nav`, headers)
+    const imgUrl = nav.data?.wbi_img?.img_url
+    const subUrl = nav.data?.wbi_img?.sub_url
+    return imgUrl && subUrl ? bilibiliMixinKey(imgUrl, subUrl) : null
+  } catch {
+    return null
+  }
+}
+
+async function fetchSubtitleList(
+  headers: Record<string, string>,
+  aid: number,
+  cid: number,
+): Promise<RawSubtitle[]> {
+  const mixinKey = await fetchMixinKey(headers)
+  if (mixinKey) {
+    const query = signWbiQuery({ aid, cid }, mixinKey)
+    const player = await getJson<PlayerResponse>(`${API_BASE}/x/player/wbi/v2?${query}`, headers)
+    // A signed response is authoritative: an empty list means this video really
+    // has no subtitles, so never fall through to the unsigned endpoint here.
+    return player.data?.subtitle?.subtitles ?? []
+  }
+  const player = await getJson<PlayerResponse>(`${API_BASE}/x/player/v2?aid=${aid}&cid=${cid}`, headers)
+  return player.data?.subtitle?.subtitles ?? []
+}
+
 /**
  * Download Bilibili subtitles via the official web APIs:
  *   x/web-interface/view   -> video metadata + multi-part page list
@@ -107,11 +184,7 @@ export async function fetchBilibiliSubtitle(
     throw new Error('无法获取视频 CID')
   }
 
-  const player = await getJson<PlayerResponse>(
-    `${API_BASE}/x/player/v2?aid=${aid}&cid=${cid}`,
-    headers,
-  )
-  const subtitleList = player.data?.subtitle?.subtitles ?? []
+  const subtitleList = await fetchSubtitleList(headers, aid, cid)
 
   if (subtitleList.length === 0) {
     const hint = process.env.BILIBILI_SESSION_TOKEN

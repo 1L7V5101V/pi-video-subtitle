@@ -10,7 +10,7 @@ and extended with SRT/VTT rendering, directory-aware downloads, and a generic
 
 | Platform | Method | Credentials |
 | --- | --- | --- |
-| **Bilibili** | Official web APIs: `x/web-interface/view` → `x/player/v2` → subtitle JSON | `BILIBILI_SESSION_TOKEN` (SESSDATA) usually required |
+| **Bilibili** | Official web APIs: `x/web-interface/view` → `x/player/wbi/v2` (WBI-signed) → subtitle JSON | `BILIBILI_SESSION_TOKEN` (SESSDATA) usually required |
 | **YouTube** | `yt-dlp` (primary) → `ytInitialPlayerResponse.captionTracks` → Innertube API | none; cookies recommended on datacenter IPs |
 | **Anything else** | yt-dlp — ~1800 sites (Twitter/X, TikTok, Vimeo, PeerTube, Weibo, TED, …) | site-dependent |
 
@@ -185,8 +185,12 @@ Force it with `dedupe: true`, or keep the raw track with `dedupe: false` / `/sub
 
 - Auto-generated caption tracks repeat the previous line, which is what the dedupe pass removes. If a
   transcript looks like it is missing words, re-run with `dedupe: false` and compare.
-- Bilibili's subtitle list is behind the logged-in `player/v2` API. Videos where the uploader disabled
+- Bilibili's subtitle list is behind the logged-in `player` API. Videos where the uploader disabled
   subtitles, or premium videos without entitlement, will return an empty list even with a valid token.
+- That request must be **WBI-signed** (`x/player/wbi/v2` with `wts` + `w_rid`). The unsigned
+  `x/player/v2` endpoint answers with either an empty list or a cached `subtitle_url` that belongs to a
+  *different* video, which is why this package signs its requests. If the `x/web-interface/nav` keys
+  cannot be read, it falls back to the unsigned endpoint rather than failing the fetch.
 - YouTube now gates its `timedtext` endpoint behind a proof-of-origin token, so the native path often
   returns an empty body. yt-dlp is the primary engine for that reason; the native path is only a
   fallback for machines without yt-dlp installed.

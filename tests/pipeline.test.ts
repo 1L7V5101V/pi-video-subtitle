@@ -8,7 +8,7 @@
  *   npm test                       # offline
  *   PI_SUBTITLE_NET_TEST=1 npm test # + a real YouTube download (needs network)
  */
-import { fetchBilibiliSubtitle } from '../src/bilibili'
+import { bilibiliMixinKey, fetchBilibiliSubtitle, signWbiQuery } from '../src/bilibili'
 import { renderSubtitle } from '../src/download'
 import { fetchSubtitle, parseVideoUrl } from '../src/fetchSubtitle'
 import { parseJson3, parseSubtitleFile } from '../src/ytdlp'
@@ -102,6 +102,29 @@ check('vtt cue settings ignored', vttCues[0].start === 1 && vttCues[0].end === 3
 check('vtt inline tags stripped', vttCues[0].text === 'Salut', vttCues[0].text)
 
 // ---------------------------------------------------------------------------
+// Bilibili WBI signing
+// ---------------------------------------------------------------------------
+console.log('\n# Bilibili WBI signing')
+
+// Real `x/web-interface/nav` key urls, plus the mixin key and signature that
+// Bilibili's own algorithm produces for them.
+const WBI_IMG_URL = 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png'
+const WBI_SUB_URL = 'https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png'
+const WBI_MIXIN_KEY = 'ea1db124af3c7062474693fa704f4ff8'
+
+check(
+  'mixin key derives from the two wbi_img urls',
+  bilibiliMixinKey(WBI_IMG_URL, WBI_SUB_URL) === WBI_MIXIN_KEY,
+  bilibiliMixinKey(WBI_IMG_URL, WBI_SUB_URL),
+)
+check(
+  'signature matches the published w_rid vector',
+  signWbiQuery({ aid: 123, cid: 456 }, WBI_MIXIN_KEY, 1700000000) ===
+    'aid=123&cid=456&wts=1700000000&w_rid=88dbb886369b20b67e75de6295df5233',
+  signWbiQuery({ aid: 123, cid: 456 }, WBI_MIXIN_KEY, 1700000000),
+)
+
+// ---------------------------------------------------------------------------
 // Bilibili pipeline (stubbed network)
 // ---------------------------------------------------------------------------
 console.log('\n# Bilibili pipeline')
@@ -131,7 +154,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       },
     })
   }
-  if (url.includes('/x/player/v2')) {
+  if (url.includes('/x/web-interface/nav')) {
+    return json({ code: 0, data: { wbi_img: { img_url: WBI_IMG_URL, sub_url: WBI_SUB_URL } } })
+  }
+  if (url.includes('/x/player/wbi/v2')) {
     return json({
       code: 0,
       data: {
@@ -175,6 +201,18 @@ try {
     calls.some((call) => call.url === 'https://aisubtitle.hdslb.com/zh.json'),
     calls.map((call) => call.url).join(' | '),
   )
+  const playerCall = calls.find((call) => call.url.includes('/x/player/wbi/v2'))
+  check('the signed player endpoint is used', Boolean(playerCall), playerCall?.url.slice(0, 64) ?? 'not called')
+  check(
+    'the signed query carries wts and a 32-char w_rid',
+    Boolean(playerCall && /[?&]wts=\d+&w_rid=[0-9a-f]{32}$/.test(playerCall.url)),
+    playerCall?.url.slice(-46) ?? '',
+  )
+  check(
+    'the unsigned player endpoint is skipped when signing works',
+    !calls.some((call) => /\/x\/player\/v2/.test(call.url)),
+    calls.map((call) => call.url).join(' | '),
+  )
   check('cues carry from/to', result.track.cues[0].start === 0.5 && result.track.cues[0].end === 2.0)
 
   const srt = renderSubtitle(result, { format: 'srt' })
@@ -202,7 +240,8 @@ try {
 
   calls.length = 0
   await fetchBilibiliSubtitle('BV1GJ411x7h7', { pageNumber: '2' })
-  check('page 2 selects cid=222', calls[1].url.includes('cid=222'), calls[1].url)
+  const pageTwo = calls.find((call) => call.url.includes('/x/player/wbi/v2'))
+  check('page 2 selects cid=222', Boolean(pageTwo?.url.includes('cid=222')), pageTwo?.url.slice(-40) ?? 'no player call')
 
   calls.length = 0
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -214,7 +253,10 @@ try {
     if (url.includes('/x/web-interface/view')) {
       return json({ code: 0, data: { aid: 1, bvid: 'BV1GJ411x7h7', title: 'T', pages: [{ page: 1, cid: 9 }] } })
     }
-    if (url.includes('/x/player/v2')) {
+    if (url.includes('/x/web-interface/nav')) {
+      return json({ code: 0, data: { wbi_img: { img_url: WBI_IMG_URL, sub_url: WBI_SUB_URL } } })
+    }
+    if (url.includes('/x/player/wbi/v2')) {
       return json({ code: 0, data: { subtitle: { subtitles: [{ lan: 'zh-CN', subtitle_url: 'https://x/zh.json' }] } } })
     }
     return json({ body: [{ from: 0, to: 1, content: 'hi' }] })
@@ -235,6 +277,35 @@ try {
       (error as Error).message.slice(0, 60),
     )
   }
+} finally {
+  globalThis.fetch = REAL_FETCH
+}
+
+// When the WBI key cannot be read the pipeline must still work through the
+// legacy endpoint rather than failing the whole fetch.
+try {
+  calls.length = 0
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    calls.push({ url })
+    if (url.includes('/x/web-interface/view')) {
+      return json({ code: 0, data: { aid: 1, bvid: 'BV1GJ411x7h7', title: 'T', pages: [{ page: 1, cid: 9 }] } })
+    }
+    if (url.includes('/x/web-interface/nav')) {
+      return new Response('unavailable', { status: 503 })
+    }
+    if (url.includes('/x/player/v2')) {
+      return json({ code: 0, data: { subtitle: { subtitles: [{ lan: 'zh-CN', subtitle_url: 'https://x/zh.json' }] } } })
+    }
+    return json({ body: [{ from: 0, to: 1, content: 'hi' }] })
+  }) as typeof fetch
+  const unsigned = await fetchBilibiliSubtitle('BV1GJ411x7h7', {})
+  check(
+    'an unavailable WBI key falls back to the unsigned endpoint',
+    calls.some((call) => /\/x\/player\/v2/.test(call.url)),
+    calls.map((call) => call.url).join(' | '),
+  )
+  check('the unsigned fallback still returns cues', unsigned.track.cues.length === 1, String(unsigned.track.cues.length))
 } finally {
   globalThis.fetch = REAL_FETCH
 }
@@ -291,7 +362,10 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   if (url.includes('/x/web-interface/view')) {
     return json({ code: 0, data: { aid: 1, bvid: 'BV1GJ411x7h7', title: 'ASR', pages: [{ page: 1, cid: 9 }] } })
   }
-  if (url.includes('/x/player/v2')) {
+  if (url.includes('/x/web-interface/nav')) {
+    return json({ code: 0, data: { wbi_img: { img_url: WBI_IMG_URL, sub_url: WBI_SUB_URL } } })
+  }
+  if (url.includes('/x/player/wbi/v2')) {
     return json({
       code: 0,
       data: { subtitle: { subtitles: [{ lan: 'ai-zh', subtitle_url: 'https://x/asr.json', ai_status: 1 }] } },
