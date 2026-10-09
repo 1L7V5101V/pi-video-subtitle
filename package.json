@@ -1,0 +1,50 @@
+{
+  "name": "pi-video-subtitle",
+  "version": "0.1.0",
+  "description": "Pi extension + skill that extracts and downloads subtitles from Bilibili, YouTube and any site yt-dlp supports. Ported from JimmyLv/BibiGPT-v1.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-skill",
+    "subtitle",
+    "subtitles",
+    "transcript",
+    "bilibili",
+    "youtube",
+    "yt-dlp",
+    "bibigpt"
+  ],
+  "homepage": "https://github.com/1L7V5101V/pi-video-subtitle",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1L7V5101V/pi-video-subtitle.git"
+  },
+  "license": "GPL-3.0-or-later",
+  "author": "1L7V5101V <malix@foxmail.com>",
+  "type": "module",
+  "files": [
+    "extensions",
+    "skills",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": ["./extensions/subtitle-fetcher.ts"],
+    "skills": ["./skills"]
+  },
+  "scripts": {
+    "test": "tsx tests/pipeline.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
