@@ -11,7 +11,8 @@
 import { bilibiliMixinKey, fetchBilibiliSubtitle, signWbiQuery } from '../src/bilibili'
 import { renderSubtitle } from '../src/download'
 import { fetchSubtitle, parseVideoUrl } from '../src/fetchSubtitle'
-import { parseJson3, parseSubtitleFile } from '../src/ytdlp'
+import { parseJson3, parseSubtitleFile, isRetryableError } from '../src/ytdlp'
+import { clashPickNext } from '../src/clash'
 import { dedupeRollingCues, overlapWordCount } from '../src/utils'
 
 let failures = 0
@@ -390,6 +391,35 @@ try {
   check('dedupe can be forced', forced.dedupe?.removedCues === 1, JSON.stringify(forced.dedupe))
 } finally {
   globalThis.fetch = REAL_FETCH
+}
+
+// ---------------------------------------------------------------------------
+// Retry & Clash node rotation helpers
+// ---------------------------------------------------------------------------
+{
+  const gated = [
+    'ERROR: [youtube] id: Sign in to confirm you’re not a bot.',
+    'ERROR: Unable to download video subtitles for en: HTTP Error 429: Too Many Requests',
+    "ERROR: Unable to download API page: ('Connection aborted.', ConnectionResetError(10054, 'An existing connection was closed by the remote host'))",
+    'ERROR: [generic] timed out',
+    'ERROR: Unable to download video subtitles for en: HTTP Error 503: Service Unavailable',
+  ]
+  for (const message of gated) check(`retryable error: “${message.slice(12, 60)}…”`, isRetryableError(message), message)
+  for (const message of ['ERROR: 404: Not Found.', 'ERROR: The video does not exist.', 'ERROR: Unsupported URL: not a video']) {
+    check(`non-retryable error: ${message}`, !isRetryableError(message), message)
+  }
+
+  const nodes = ['新加坡03aws', '美国02aws', '日本01aws', 'DIRECT', 'REJECT', '新加坡02aws']
+  check('clashPickNext skips DIRECT/REJECT', clashPickNext(nodes, '美国02aws', new Set()) === '日本01aws', String(clashPickNext(nodes, '美国02aws', new Set())))
+  const tried = new Set(['日本01aws'])
+  const afterTried = clashPickNext(nodes, '日本01aws', tried)
+  check('clashPickNext skips already-tried nodes', afterTried === '新加坡03aws', afterTried ?? 'null')
+  check('clashPickNext wraps around', clashPickNext(['A', 'B', 'C'], 'C', new Set()) === 'A', String(clashPickNext(['A', 'B', 'C'], 'C', new Set())))
+  check(
+    'clashPickNext empty when everything tried',
+    clashPickNext(['A', 'B', 'C'], 'A', new Set(['A', 'B', 'C'])) === null,
+    'null',
+  )
 }
 
 // ---------------------------------------------------------------------------

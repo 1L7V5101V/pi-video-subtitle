@@ -76,6 +76,17 @@ export PI_SUBTITLE_PROXY=http://127.0.0.1:7890
 # (e.g. YouTube's “Sign in to confirm you're not a bot”)
 export YT_DLP_COOKIES=/path/cookies.txt              # recommended: Netscape cookies.txt
 export YT_DLP_COOKIES_FROM_BROWSER=chrome            # may fail on Windows, see below
+
+# Optional: retry policy when a download fails with a transient/anti-bot error
+export PI_SUBTITLE_RETRIES=3        # total attempts (default 3, max 6)
+export PI_SUBTITLE_RETRY_BASE_MS=2000   # base backoff; grows exponentially
+
+# Optional: auto-rotate the Clash proxy node between retries (default ON when a
+# Clash/mihomo controller is found). Set 0 to disable.
+export PI_SUBTITLE_CLASH=1
+export PI_SUBTITLE_CLASH_GROUP=       # optional: pin the group to rotate (auto-detected)
+export PI_SUBTITLE_CLASH_CTRL=        # optional: http://127.0.0.1:9097 or \\.\pipe\name
+export PI_SUBTITLE_CLASH_SECRET=      # optional: controller secret (auto-read from config)
 ```
 
 On Windows PowerShell:
@@ -94,6 +105,18 @@ exits before touching the video. The extension detects exactly that failure and 
 cookies, so you keep the video you could still fetch — but if a site really needs a login, export a
 Netscape-format `cookies.txt` (e.g. the “Get cookies.txt LOCALLY” extension) and point `YT_DLP_COOKIES`
 at it instead.
+
+### Retries and Clash node rotation
+
+Rate limits happen (YouTube answers `429` for most advertised auto-translated tracks) and datacenter exit
+IPs get flagged by YouTube's bot gate (“Sign in to confirm you're not a bot”). The extension therefore
+re-runs transiently failed downloads with exponential backoff — `PI_SUBTITLE_RETRIES` attempts, base
+`PI_SUBTITLE_RETRY_BASE_MS` — and, when a Clash/mihomo controller is reachable, **rotates the proxy
+node** between attempts: it discovers the controller (Clash Verge reads `external-controller`/named-pipe
+from its config), finds the group your traffic actually routes through (the outermost chain of an active
+connection), steps to the next node in that group, retries, and finally **restores the node you had
+selected** so your browsing is unaffected. Set `PI_SUBTITLE_CLASH=0` to disable rotation; pin the group
+with `PI_SUBTITLE_CLASH_GROUP` if auto-detection picks the wrong one.
 
 ## Test
 

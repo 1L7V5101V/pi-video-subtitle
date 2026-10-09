@@ -2,6 +2,8 @@ import { spawnSync } from 'node:child_process'
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { clashEnabled, clashGroup, clashPickNext, clashRoutingGroup, clashSelectNode, discoverClashController } from './clash'
+import type { ClashController } from './clash'
 import type { FetchSubtitleOptions, FetchSubtitleResult, SubtitleCue, SubtitleTrackInfo, VideoService } from './types'
 import { rankTracks } from './utils'
 
@@ -101,7 +103,8 @@ export function ytDlpHint(): string {
     '\n\n提示：若所在网络无法直连，可设置代理后重试：PI_SUBTITLE_PROXY=http://127.0.0.1:7890（yt-dlp 亦会读取 HTTPS_PROXY）。' +
     '若站点要求登录（例如 YouTube 提示 “Sign in to confirm you’re not a bot”），请为 yt-dlp 配置 cookies：' +
     'YT_DLP_COOKIES=/path/cookies.txt（推荐，Netscape 格式）。注意 Chrome 127+ / Edge 的 cookies 在 Windows 上' +
-    '常见无法解密（DPAPI / app-bound encryption），此时 YT_DLP_COOKIES_FROM_BROWSER 会失败，扩展会自动回退到无 cookies 重试。'
+    '常见无法解密（DPAPI / app-bound encryption），此时 YT_DLP_COOKIES_FROM_BROWSER 会失败，扩展会自动回退到无 cookies 重试。' +
+    '扩展默认会重试 3 次，且若检测到本机 Clash 控制器，会自动轮换代理节点（PI_SUBTITLE_RETRIES 可调，PI_SUBTITLE_CLASH=0 可关闭轮换）。'
   )
 }
 
@@ -155,6 +158,119 @@ function runYtDlp(args: string[]): string {
   throw new Error(lastLine(first.stderr))
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Total download attempts, `PI_SUBTITLE_RETRIES` (default 3, max 6). */
+function retryAttempts(): number {
+  const raw = Number(process.env.PI_SUBTITLE_RETRIES)
+  return Number.isFinite(raw) && raw >= 1 ? Math.min(Math.floor(raw), 6) : 3
+}
+
+/** Base backoff between attempts, `PI_SUBTITLE_RETRY_BASE_MS` (default 2000). */
+function retryBaseMs(): number {
+  const raw = Number(process.env.PI_SUBTITLE_RETRY_BASE_MS)
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 2000
+}
+
+const RETRYABLE_ERROR =
+  /Sign in to confirm|HTTP Error (?:429|[5-9]\d\d)|ConnectionResetError|Connection aborted|Unable to download|timed? ?out|Temporary failure|Could not write|socket hang up|empty reply|Remote end closed|ECONNRESET/i
+
+export function isRetryableError(message: string): boolean {
+  return RETRYABLE_ERROR.test(message)
+}
+
+interface ClashRotation {
+  rotating: boolean
+  tried: string[]
+  rotate(): Promise<string | null>
+  restore(): Promise<void>
+}
+
+const noRotation: ClashRotation = {
+  rotating: false,
+  tried: [],
+  rotate: async () => null,
+  restore: async () => {},
+}
+
+/**
+ * Set up node rotation for this request: find the Clash controller, the group
+ * the traffic actually routes through, and remember the user's selected node
+ * so it can be restored when we are done.
+ */
+async function makeClashRotation(): Promise<ClashRotation> {
+  if (!clashEnabled()) return noRotation
+  let ctrl: ClashController | null = null
+  try {
+    ctrl = await discoverClashController()
+  } catch {
+    return noRotation
+  }
+  if (!ctrl) return noRotation
+  try {
+    const group = await clashRoutingGroup(ctrl)
+    if (!group) return noRotation
+    const info = await clashGroup(ctrl, group)
+    if (!info || info.all.length < 2) return noRotation
+    const tried = new Set<string>()
+    const triedList: string[] = []
+    const original = info.now
+    let restored = false
+    return {
+      rotating: true,
+      tried: triedList,
+      async rotate() {
+        const fresh = await clashGroup(ctrl, group).catch(() => null)
+        const node = clashPickNext(fresh?.all ?? info.all, fresh?.now, tried)
+        if (!node) return null
+        const ok = await clashSelectNode(ctrl, group, node).catch(() => false)
+        if (!ok) return null
+        tried.add(node)
+        triedList.push(node)
+        await sleep(1200) // let the new node come up before retrying
+        return node
+      },
+      async restore() {
+        if (restored || triedList.length === 0 || !original) return
+        restored = true
+        await clashSelectNode(ctrl, group, original).catch(() => {})
+      },
+    }
+  } catch {
+    return noRotation
+  }
+}
+
+/**
+ * Run one yt-dlp command with retry + exponential backoff, rotating the Clash
+ * proxy node between attempts so a bot-gated node gets a chance to be replaced
+ * by a working one. The user's original node is restored afterwards.
+ */
+async function executeYtDlp(args: string[]): Promise<string> {
+  const attempts = retryAttempts()
+  const rotation = await makeClashRotation()
+  const backoff = (attempt: number): number => retryBaseMs() * 2 ** (attempt - 2)
+  let lastError: unknown = new Error('yt-dlp 未返回输出。')
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (attempt > 1) await sleep(backoff(attempt))
+    try {
+      const stdout = runYtDlp(args)
+      await rotation.restore()
+      return stdout
+    } catch (error) {
+      lastError = error
+      const message = error instanceof Error ? error.message : String(error)
+      if (attempt === attempts || !isRetryableError(message)) {
+        await rotation.restore()
+        throw error
+      }
+      await rotation.rotate()
+    }
+  }
+  const rotated = rotation.tried.length > 0 ? `，已切换 Clash 节点：${rotation.tried.join(' → ')}` : ''
+  throw new Error(`${lastError instanceof Error ? lastError.message : String(lastError)}（第 ${attempts} 次尝试仍失败${rotated}）`)
+}
+
 /**
  * `--list-subs` is not decoration: some extractors (PeerTube, for one) only
  * populate the subtitle list when yt-dlp is in listing mode. It prints a human
@@ -169,8 +285,8 @@ function parseLastJsonLine(output: string): YtDlpInfo {
   throw new Error('yt-dlp 未返回可解析的视频信息。')
 }
 
-export function ytDlpInfo(url: string): YtDlpInfo {
-  return parseLastJsonLine(runYtDlp(['--dump-single-json', '--skip-download', '--list-subs', url]))
+export async function ytDlpInfo(url: string): Promise<YtDlpInfo> {
+  return parseLastJsonLine(await executeYtDlp(['--dump-single-json', '--skip-download', '--list-subs', url]))
 }
 
 export function ytDlpTracks(info: YtDlpInfo): SubtitleTrackInfo[] {
@@ -187,7 +303,7 @@ export function ytDlpTracks(info: YtDlpInfo): SubtitleTrackInfo[] {
 async function ytDlpDownloadCues(url: string, language: string): Promise<SubtitleCue[]> {
   const dir = await mkdtemp(join(tmpdir(), 'pi-ytdlp-'))
   try {
-    runYtDlp([
+    await executeYtDlp([
       '--skip-download',
       '--write-subs',
       '--write-auto-subs',
@@ -218,7 +334,7 @@ export async function fetchWithYtDlp(
   options: FetchSubtitleOptions = {},
   service: VideoService = 'ytdlp',
 ): Promise<FetchSubtitleResult> {
-  const info = ytDlpInfo(url)
+  const info = await ytDlpInfo(url)
   const tracks = ytDlpTracks(info)
   if (tracks.length === 0) {
     throw new Error('该视频没有字幕轨道（subtitles / automatic_captions 均为空）。')
